@@ -1,66 +1,164 @@
-﻿using System.Runtime.CompilerServices;
+﻿using System.Collections.Concurrent;
+using System.Runtime.CompilerServices;
 using weather_report_smhi.Domain.Abstractions;
 using weather_report_smhi.Domain.Constants;
 using weather_report_smhi.Domain.Models;
 
 namespace weather_report_smhi.Application;
 
-/// <summary>
-/// Business logic. Keeps Program.cs minimal and respects LoD.
-/// </summary>
-public sealed class WeatherService(ISmhiClient client) : IWeatherService
+public sealed class WeatherService : IWeatherService
 {
+    private static readonly TimeSpan LatestWindow = TimeSpan.FromMinutes(120);
+    private readonly ISmhiClient _client;
+
+    public WeatherService(ISmhiClient client) => _client = client;
+
     /// <summary>
-    /// Computes the average temperature over all stations for the latest hour.
-    /// Returns null if no numeric values are available.
+    /// Returns Sweden average temperature for the latest hour if available.
+    /// If that dataset contains no numeric samples, we fall back to per-station "latest-day"
+    /// and keep only samples whose timestamps are within the last 120 minutes.
     /// </summary>
     public async Task<double?> GetSwedenAverageTemperatureLatestHourAsync(CancellationToken ct)
     {
-        var res = await client.GetLatestHourTemperatureAllAsync(ct);
-        var values = res?.Value?.Where(v => v.Value.HasValue).Select(v => v.Value!.Value).ToArray() ?? [];
-        return values.Length == 0 ? null : Math.Round(values.Average(), 1, MidpointRounding.AwayFromZero);
+        // --- Primary: station-set latest-hour (exists for parameter 1) ---
+        var res = await _client.GetLatestHourTemperatureAllAsync(ct);
+
+        var count = res?.Value?.Count ?? 0;
+
+        var hourValues = res?.Value?
+            .Where(v => v.Value.HasValue)
+            .Select(v => v.Value!.Value)
+            .ToArray() ?? Array.Empty<double>();
+
+        if (hourValues.Length == 0 && count > 0)
+
+        if (hourValues.Length > 0)
+            return Math.Round(hourValues.Average(), 1, MidpointRounding.AwayFromZero);
+
+        var stations = await _client.GetStationsAsync(MetObs.TemperatureParam, ct);
+        var list = stations?.Station ?? Array.Empty<StationInfo>();
+        if (list.Count == 0) return null; // <-- Count, not Length
+
+        const int maxConcurrency = 6; // keep gentle
+        using var sem = new SemaphoreSlim(maxConcurrency);
+        var bag = new ConcurrentBag<double>();
+        var now = DateTimeOffset.UtcNow;
+
+        var tasks = list.Select(async s =>
+        {
+            await sem.WaitAsync(ct).ConfigureAwait(false);
+            try
+            {
+                var series = await _client.GetLatestDayTemperatureForStationAsync(s.Id, ct).ConfigureAwait(false);
+                var recent = series?.Value?
+                    .Where(v => v.Value.HasValue)
+                    .Select(v => new { v.Value, Dt = FromUnixMs(v.DateUnixMs) })
+                    .Where(x => x.Dt.HasValue && (now - x.Dt!.Value) <= LatestWindow)
+                    .OrderByDescending(x => x.Dt!.Value)
+                    .Select(x => (double?)x.Value!.Value)
+                    .FirstOrDefault();
+
+                if (recent.HasValue) bag.Add(recent.Value);
+            }
+            catch
+            {
+                // swallow per-station failures; best-effort average
+            }
+            finally
+            {
+                sem.Release();
+            }
+        });
+
+        await Task.WhenAll(tasks).ConfigureAwait(false);
+
+        if (bag.IsEmpty) return null;
+
+        var avg = bag.Average();
+        return Math.Round(avg, 1, MidpointRounding.AwayFromZero);
     }
 
     /// <summary>
-    /// Sums monthly precipitation (mm) for a station whose name contains "Lund".
-    /// Returns (0, empty) if station or values are not found.
+    /// Sums monthly precipitation (mm) for Lund (station 53430) over the “latest-months” period,
+    /// and returns both the total and the list of month labels like "2025-06".
     /// </summary>
     public async Task<(double totalMm, IReadOnlyList<string> months)> GetLundTotalRainLatestMonthsAsync(CancellationToken ct)
     {
-        var stations = await client.GetStationsAsync(MetObs.MonthlyPrecipParam, ct);
-        var lund = stations?.Station?.FirstOrDefault(s => s.Name?.Contains("Lund", StringComparison.OrdinalIgnoreCase) == true);
-        if (lund is null) return (0, Array.Empty<string>());
+        const int lundStationId = 53430;
+        var data = await _client.GetLatestMonthsForStationAsync(MetObs.MonthlyPrecipParam, lundStationId, ct);
 
-        var data = await client.GetLatestMonthsForStationAsync(MetObs.MonthlyPrecipParam, lund.Id, ct);
-        var items = data?.Value?.Where(v => v.Value.HasValue) ?? Enumerable.Empty<StationData>();
+        var items = data?.Value ?? Array.Empty<StationData>();
+        if (items.Count == 0) return (0d, Array.Empty<string>());
 
-        var byMonth = items
-            .GroupBy(v => DateTimeOffset.FromUnixTimeMilliseconds(v.DateUnixMs).UtcDateTime)
-            .Select(g => new { Month = new DateTime(g.Key.Year, g.Key.Month, 1), Sum = g.Sum(x => x.Value ?? 0) })
-            .OrderBy(x => x.Month)
-            .ToList();
+        var months = new List<string>(items.Count);
+        double sum = 0;
 
-        var total = Math.Round(byMonth.Sum(x => x.Sum), 1);
-        var labels = byMonth.Select(x => x.Month.ToString("yyyy-MM")).ToList();
-        return (total, labels);
+        foreach (var v in items)
+        {
+            if (v.Value.HasValue) sum += v.Value.Value;
+
+            string label =
+                !string.IsNullOrWhiteSpace(v.Ref) ? v.Ref! :
+                v.From.HasValue ? FromUnixMs(v.From.Value)?.ToString("yyyy-MM") ?? "" :
+                "";
+
+            if (!string.IsNullOrEmpty(label))
+                months.Add(label);
+        }
+
+        return (Math.Round(sum, 1, MidpointRounding.AwayFromZero), months);
     }
 
     /// <summary>
-    /// Streams temperature readings with a 100ms pause and cancellation support.
+    /// Streams the most recent temperature for each station (per-station "latest-day", throttled).
+    /// Each yielded item is (stationId, stationName, tempC). Some stations may yield null tempC.
     /// </summary>
     public async IAsyncEnumerable<(int stationId, string stationName, double? tempC)> StreamAllStationsTemperatureAsync(
         [EnumeratorCancellation] CancellationToken ct)
     {
-        var latest = await client.GetLatestHourTemperatureAllAsync(ct);
-        var stationSet = await client.GetStationsAsync(MetObs.TemperatureParam, ct);
-        var names = (stationSet?.Station ?? []).ToDictionary(s => s.Id, s => s.Name ?? s.Id.ToString());
+        var stations = await _client.GetStationsAsync(MetObs.TemperatureParam, ct);
+        var list = stations?.Station ?? Array.Empty<StationInfo>();
 
-        foreach (var v in latest?.Value ?? [])
+        const int maxConcurrency = 6;
+        using var sem = new SemaphoreSlim(maxConcurrency);
+        var bag = new ConcurrentBag<(int id, string name, double? t)>();
+
+        var tasks = list.Select(async s =>
         {
-            ct.ThrowIfCancellationRequested();
-            var name = v.StationId is int id && names.TryGetValue(id, out var n) ? n : $"Station {v.StationId}";
-            yield return (v.StationId ?? -1, name, v.Value);
-            await Task.Delay(100, ct);
-        }
+            await sem.WaitAsync(ct).ConfigureAwait(false);
+            try
+            {
+                var series = await _client.GetLatestDayTemperatureForStationAsync(s.Id, ct).ConfigureAwait(false);
+                var latest = series?.Value?
+                    .Where(v => v.Value.HasValue)
+                    .Select(v => new { v.Value, Dt = FromUnixMs(v.DateUnixMs) })
+                    .OrderByDescending(x => x.Dt ?? DateTimeOffset.MinValue)
+                    .Select(x => (double?)x.Value!.Value)
+                    .FirstOrDefault();
+
+                bag.Add((s.Id, s.Name, latest));
+            }
+            catch
+            {
+                bag.Add((s.Id, s.Name, null));
+            }
+            finally
+            {
+                sem.Release();
+            }
+        });
+
+        await Task.WhenAll(tasks).ConfigureAwait(false);
+
+        foreach (var item in bag)
+            yield return item;
+    }
+
+    // ---- helpers ----
+    private static DateTimeOffset? FromUnixMs(long ms)
+    {
+        if (ms <= 0) return null;
+        try { return DateTimeOffset.FromUnixTimeMilliseconds(ms); }
+        catch { return null; }
     }
 }

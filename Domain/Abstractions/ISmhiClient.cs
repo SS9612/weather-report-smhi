@@ -9,4 +9,7 @@ public interface ISmhiClient
     Task<StationSetDataResponse?> GetLatestHourTemperatureAllAsync(CancellationToken ct);
     Task<StationSetResponse?> GetStationsAsync(int parameterId, CancellationToken ct);
     Task<StationSetDataResponse?> GetLatestMonthsForStationAsync(int parameterId, int stationId, CancellationToken ct);
+    Task<StationSetDataResponse?> GetLatestDayTemperatureAllAsync(CancellationToken ct);
+    Task<StationSetDataResponse?> GetLatestDayTemperatureForStationAsync(int stationId, CancellationToken ct);
+
 }
