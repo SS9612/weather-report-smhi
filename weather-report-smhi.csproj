@@ -14,9 +14,4 @@
     <PackageReference Include="System.Net.Http.Json" Version="9.0.10" />
   </ItemGroup>
 
-  <ItemGroup>
-    <Folder Include="Application\" />
-    <Folder Include="Infrastructure\" />
-  </ItemGroup>
-
 </Project>

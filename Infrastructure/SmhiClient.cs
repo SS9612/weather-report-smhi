@@ -4,9 +4,6 @@ using System.Text.Json;
 using weather_report_smhi.Domain.Abstractions;
 using weather_report_smhi.Domain.Constants;
 using weather_report_smhi.Domain.Models;
-using WeatherReport.App.Domain.Abstractions;
-using WeatherReport.App.Domain.Constants;
-using WeatherReport.App.Domain.Models;
 
 namespace weather_report_smhi.Infrastructure;
 
