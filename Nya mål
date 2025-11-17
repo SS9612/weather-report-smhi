@@ -1,0 +1,74 @@
+Architecture Changes
+1. Database Layer (Entity Framework Core)
+Add EF Core packages: Microsoft.EntityFrameworkCore.SqlServer, Microsoft.EntityFrameworkCore.Design, Microsoft.EntityFrameworkCore.Tools
+Create DbContext: Infrastructure/WeatherDbContext.cs
+Create entities:
+Domain/Entities/Station.cs - Station information (Id, Name, LastUpdated)
+Domain/Entities/WeatherMeasurement.cs - Measurements (Id, StationId, ParameterId, Value, Timestamp, Quality)
+Add connection string configuration in appsettings.json
+Create migrations and database initialization
+2. Repository Pattern
+Create interface: Domain/Abstractions/IWeatherRepository.cs
+Implement repository: Infrastructure/WeatherRepository.cs
+Methods needed:
+SaveStationsAsync() - Upsert station information
+SaveMeasurementsAsync() - Bulk insert measurements
+GetLatestMeasurementsAsync() - Get recent data for API
+GetHistoricalDataAsync() - Get data for date ranges
+GetStationsAsync() - Get all stations
+3. Background Data Collection Service
+Create service: Application/BackgroundDataCollectionService.cs implementing IHostedService
+Features:
+Runs on a timer (e.g., every hour)
+Fetches temperature data for all stations
+Fetches precipitation data for monitored stations (like Lund)
+Stores data in database via repository
+Handles errors gracefully with logging
+Register in DI: Add as hosted service in Program.cs
+4. Update WeatherService
+Inject repository: Add IWeatherRepository to WeatherService constructor
+Modify methods: After fetching data, also save to database
+Keep existing functionality: All current methods continue to work
+5. Web API Layer
+Add packages: Microsoft.AspNetCore.App (or minimal API packages)
+Create API project structure or add API to existing:
+Option A: Separate Api project (cleaner separation)
+Option B: Add API endpoints to existing project (simpler)
+Create controllers/endpoints:
+GET /api/stations - List all stations
+GET /api/stations/{id}/measurements - Get measurements for a station
+GET /api/stations/{id}/measurements/latest - Get latest measurement
+GET /api/measurements - Query measurements (with filters: stationId, parameterId, fromDate, toDate)
+GET /api/stats/average-temperature - Get average temperature (Sweden-wide)
+GET /api/stats/lund-rainfall - Get Lund rainfall totals
+Add CORS for React frontend
+Configure API in Program.cs (if adding to existing project)
+6. Configuration
+Add appsettings.json:
+Connection string for SQL Server
+Background service interval
+API settings (CORS origins, etc.)
+Update Program.cs:
+Register DbContext
+Register repository
+Register background service
+Configure API (if adding to existing project)
+7. Data Migration Strategy
+Initial data: Background service will populate database on first run
+Deduplication: Use unique constraints/indexes to prevent duplicate entries
+Data retention: Consider adding cleanup of old data (optional)
+Implementation Order
+Add EF Core packages and create entities
+Create DbContext and repository
+Update WeatherService to use repository
+Create background service
+Add Web API endpoints
+Configure everything in Program.cs
+Test data collection and API endpoints
+Key Considerations
+Database schema: Use composite unique index on (StationId, ParameterId, Timestamp) to prevent duplicates
+Performance: Use bulk insert for measurements, consider batching
+Error handling: Background service should continue even if some stations fail
+API design: RESTful endpoints, proper HTTP status codes, pagination for large datasets
+CORS: Configure for React frontend origin
+Logging: Continue using existing logging infrastructure
