@@ -32,7 +32,7 @@ public sealed class SmhiClient(HttpClient http) : ISmhiClient
         using var req = new HttpRequestMessage(HttpMethod.Get, url);
         using var resp = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
 
-        if (resp.StatusCode == HttpStatusCode.NotFound) return null; // quiet 404
+        if (resp.StatusCode == HttpStatusCode.NotFound) return null; 
         if (!resp.IsSuccessStatusCode)
         {
             Console.Error.WriteLine($"[http] {resp.StatusCode} for {url}");
@@ -49,7 +49,7 @@ public sealed class SmhiClient(HttpClient http) : ISmhiClient
         using var req = new HttpRequestMessage(HttpMethod.Get, url);
         using var resp = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
 
-        if (resp.StatusCode == HttpStatusCode.NotFound) return null; // quiet 404
+        if (resp.StatusCode == HttpStatusCode.NotFound) return null; 
         if (!resp.IsSuccessStatusCode)
         {
             Console.Error.WriteLine($"[http] {resp.StatusCode} for {url}");
@@ -66,7 +66,7 @@ public sealed class SmhiClient(HttpClient http) : ISmhiClient
         using var req = new HttpRequestMessage(HttpMethod.Get, url);
         using var resp = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
 
-        if (resp.StatusCode == HttpStatusCode.NotFound) return null; // quiet 404
+        if (resp.StatusCode == HttpStatusCode.NotFound) return null; 
         if (!resp.IsSuccessStatusCode)
         {
             Console.Error.WriteLine($"[http] {resp.StatusCode} for {url}");
@@ -83,7 +83,7 @@ public sealed class SmhiClient(HttpClient http) : ISmhiClient
         using var req = new HttpRequestMessage(HttpMethod.Get, url);
         using var resp = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
 
-        if (resp.StatusCode == HttpStatusCode.NotFound) return null; // quiet 404
+        if (resp.StatusCode == HttpStatusCode.NotFound) return null;
         if (!resp.IsSuccessStatusCode)
         {
             Console.Error.WriteLine($"[http] {resp.StatusCode} for {url}");
@@ -96,7 +96,7 @@ public sealed class SmhiClient(HttpClient http) : ISmhiClient
 
     public async Task<StationSetDataResponse?> GetLatestDayTemperatureForStationAsync(int stationId, CancellationToken ct)
     {
-        // If we already saw a 404 for this station/period once, skip calling again to avoid spam + wasted calls
+        // If we already saw a 404 for this station/period once, skip calling again to avoid spam
         if (_noLatestDayTempStation.ContainsKey(stationId))
             return null;
 
@@ -106,8 +106,8 @@ public sealed class SmhiClient(HttpClient http) : ISmhiClient
 
         if (resp.StatusCode == HttpStatusCode.NotFound)
         {
-            _noLatestDayTempStation.TryAdd(stationId, 0); // memoize missing period for this station
-            return null; // quiet 404
+            _noLatestDayTempStation.TryAdd(stationId, 0); 
+            return null;
         }
 
         if (!resp.IsSuccessStatusCode)
