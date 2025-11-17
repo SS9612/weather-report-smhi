@@ -1,5 +1,6 @@
 ﻿using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
+using Microsoft.Extensions.Logging;
 using weather_report_smhi.Domain.Abstractions;
 using weather_report_smhi.Domain.Constants;
 using weather_report_smhi.Domain.Models;
@@ -10,8 +11,13 @@ public sealed class WeatherService : IWeatherService
 {
     private static readonly TimeSpan LatestWindow = TimeSpan.FromMinutes(120);
     private readonly ISmhiClient _client;
+    private readonly ILogger<WeatherService> _logger;
 
-    public WeatherService(ISmhiClient client) => _client = client;
+    public WeatherService(ISmhiClient client, ILogger<WeatherService> logger)
+    {
+        _client = client;
+        _logger = logger;
+    }
 
     /// <summary>
     /// Returns Sweden average temperature for the latest hour if available.
@@ -19,7 +25,7 @@ public sealed class WeatherService : IWeatherService
     public async Task<double?> GetSwedenAverageTemperatureLatestHourAsync(CancellationToken ct)
     {
         // --- Primary: station-set latest-hour (exists for parameter 1) ---
-        var res = await _client.GetLatestHourTemperatureAllAsync(ct);
+        var res = await _client.GetLatestHourTemperatureAllAsync(ct).ConfigureAwait(false);
 
         var count = res?.Value?.Count ?? 0;
 
@@ -31,7 +37,7 @@ public sealed class WeatherService : IWeatherService
         if (hourValues.Length > 0)
             return Math.Round(hourValues.Average(), 1, MidpointRounding.AwayFromZero);
 
-        var stations = await _client.GetStationsAsync(MetObs.TemperatureParam, ct);
+        var stations = await _client.GetStationsAsync(MetObs.TemperatureParam, ct).ConfigureAwait(false);
         var list = stations?.Station ?? Array.Empty<StationInfo>();
         if (list.Count == 0) return null;
 
@@ -56,9 +62,9 @@ public sealed class WeatherService : IWeatherService
 
                 if (recent.HasValue) bag.Add(recent.Value);
             }
-            catch
+            catch (Exception ex)
             {
-
+                _logger.LogWarning(ex, "Failed to fetch temperature for station {StationId}", s.Id);
             }
             finally
             {
@@ -80,7 +86,7 @@ public sealed class WeatherService : IWeatherService
     public async Task<(double totalMm, IReadOnlyList<string> months)> GetLundTotalRainLatestMonthsAsync(CancellationToken ct)
     {
         const int lundStationId = 53430;
-        var data = await _client.GetLatestMonthsForStationAsync(MetObs.MonthlyPrecipParam, lundStationId, ct);
+        var data = await _client.GetLatestMonthsForStationAsync(MetObs.MonthlyPrecipParam, lundStationId, ct).ConfigureAwait(false);
 
         var items = data?.Value ?? Array.Empty<StationData>();
         if (items.Count == 0) return (0d, Array.Empty<string>());
@@ -111,13 +117,19 @@ public sealed class WeatherService : IWeatherService
     public async IAsyncEnumerable<(int stationId, string stationName, double? tempC)> StreamAllStationsTemperatureAsync(
         [EnumeratorCancellation] CancellationToken ct)
     {
-        var stations = await _client.GetStationsAsync(MetObs.TemperatureParam, ct);
+        var stations = await _client.GetStationsAsync(MetObs.TemperatureParam, ct).ConfigureAwait(false);
         var list = stations?.Station ?? Array.Empty<StationInfo>();
 
         const int maxConcurrency = 6;
         using var sem = new SemaphoreSlim(maxConcurrency);
-        var bag = new ConcurrentBag<(int id, string name, double? t)>();
+        var channel = System.Threading.Channels.Channel.CreateBounded<(int id, string name, double? t)>(
+            new System.Threading.Channels.BoundedChannelOptions(64)
+            {
+                SingleReader = true,
+                SingleWriter = false
+            });
 
+        // Start all tasks, but don't wait for them
         var tasks = list.Select(async s =>
         {
             await sem.WaitAsync(ct).ConfigureAwait(false);
@@ -131,21 +143,41 @@ public sealed class WeatherService : IWeatherService
                     .Select(x => (double?)x.Value!.Value)
                     .FirstOrDefault();
 
-                bag.Add((s.Id, s.Name, latest));
+                await channel.Writer.WriteAsync((s.Id, s.Name, latest), ct).ConfigureAwait(false);
             }
-            catch
+            catch (Exception ex)
             {
-                bag.Add((s.Id, s.Name, null));
+                _logger.LogWarning(ex, "Failed to fetch temperature for station {StationId}", s.Id);
+                try
+                {
+                    await channel.Writer.WriteAsync((s.Id, s.Name, null), ct).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    // Channel closed or cancelled - ignore
+                }
             }
             finally
             {
                 sem.Release();
             }
+        }).ToList();
+
+        // Close the channel when all tasks complete (don't pass ct to ensure it always completes)
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.WhenAll(tasks).ConfigureAwait(false);
+            }
+            finally
+            {
+                channel.Writer.Complete();
+            }
         });
 
-        await Task.WhenAll(tasks).ConfigureAwait(false);
-
-        foreach (var item in bag)
+        // Stream results as they become available
+        await foreach (var item in channel.Reader.ReadAllAsync(ct))
         {
             // Skip stations with null temperature or invalid station names
             if (!item.t.HasValue || 
