@@ -15,8 +15,6 @@ public sealed class WeatherService : IWeatherService
 
     /// <summary>
     /// Returns Sweden average temperature for the latest hour if available.
-    /// If that dataset contains no numeric samples, we fall back to per-station "latest-day"
-    /// and keep only samples whose timestamps are within the last 120 minutes.
     /// </summary>
     public async Task<double?> GetSwedenAverageTemperatureLatestHourAsync(CancellationToken ct)
     {
@@ -30,16 +28,14 @@ public sealed class WeatherService : IWeatherService
             .Select(v => v.Value!.Value)
             .ToArray() ?? Array.Empty<double>();
 
-        if (hourValues.Length == 0 && count > 0)
-
         if (hourValues.Length > 0)
             return Math.Round(hourValues.Average(), 1, MidpointRounding.AwayFromZero);
 
         var stations = await _client.GetStationsAsync(MetObs.TemperatureParam, ct);
         var list = stations?.Station ?? Array.Empty<StationInfo>();
-        if (list.Count == 0) return null; // <-- Count, not Length
+        if (list.Count == 0) return null;
 
-        const int maxConcurrency = 6; // keep gentle
+        const int maxConcurrency = 6;
         using var sem = new SemaphoreSlim(maxConcurrency);
         var bag = new ConcurrentBag<double>();
         var now = DateTimeOffset.UtcNow;
@@ -62,7 +58,7 @@ public sealed class WeatherService : IWeatherService
             }
             catch
             {
-                // swallow per-station failures; best-effort average
+
             }
             finally
             {
@@ -80,7 +76,6 @@ public sealed class WeatherService : IWeatherService
 
     /// <summary>
     /// Sums monthly precipitation (mm) for Lund (station 53430) over the “latest-months” period,
-    /// and returns both the total and the list of month labels like "2025-06".
     /// </summary>
     public async Task<(double totalMm, IReadOnlyList<string> months)> GetLundTotalRainLatestMonthsAsync(CancellationToken ct)
     {
@@ -151,7 +146,15 @@ public sealed class WeatherService : IWeatherService
         await Task.WhenAll(tasks).ConfigureAwait(false);
 
         foreach (var item in bag)
+        {
+            // Skip stations with null temperature or invalid station names
+            if (!item.t.HasValue || 
+                string.IsNullOrWhiteSpace(item.name) || 
+                item.name.Equals("n/a", StringComparison.OrdinalIgnoreCase))
+                continue;
+            
             yield return item;
+        }
     }
 
     // ---- helpers ----

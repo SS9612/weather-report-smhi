@@ -8,30 +8,25 @@ using weather_report_smhi.Infrastructure;
 using System.Net;
 using System.Net.Http;
 
-// -----------------------------
-// Program
-// -----------------------------
 var builder = Host.CreateApplicationBuilder(args);
 
 // 1) Turn down built-in HttpClient INFO spam
-builder.Logging.SetMinimumLevel(LogLevel.Information); // app defaults
+builder.Logging.SetMinimumLevel(LogLevel.Information); 
 builder.Logging.AddFilter("System.Net.Http.HttpClient", LogLevel.Warning);
 builder.Logging.AddFilter("System.Net.Http.HttpClient.ISmhiClient", LogLevel.Warning);
 builder.Logging.AddFilter("System.Net.Http.HttpClient.ISmhiClient.ClientHandler", LogLevel.Warning);
 builder.Logging.AddFilter("System.Net.Http.HttpClient.ISmhiClient.LogicalHandler", LogLevel.Warning);
 
-// 2) Register a quiet handler that only logs non-success HTTP results (once)
 builder.Services.AddTransient<QuietHttpLoggingHandler>();
 
-// 3) Typed client with polite connection limits
 builder.Services.AddHttpClient<ISmhiClient, SmhiClient>(c =>
 {
     c.BaseAddress = new Uri(MetObs.BaseUrl);
     c.Timeout = TimeSpan.FromSeconds(15);
 })
-// log only failures, not every start/end
+
 .AddHttpMessageHandler<QuietHttpLoggingHandler>()
-// be polite & stable under load
+
 .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
 {
     MaxConnectionsPerServer = 8
@@ -48,31 +43,54 @@ using var cts = new CancellationTokenSource();
 
 try
 {
-    // 1) Average temperature in Sweden (latest hour)
-    var avg = await svc.GetSwedenAverageTemperatureLatestHourAsync(cts.Token);
-    Console.WriteLine(avg is null
-        ? "No temperature data available for the latest hour."
-        : $"Average temperature in Sweden (latest hour): {avg:F1} °C");
-
-    // 2) Total rainfall in Lund (latest months)
-    var (totalMm, months) = await svc.GetLundTotalRainLatestMonthsAsync(cts.Token);
-    Console.WriteLine(months.Count > 0
-        ? $"Total rainfall in Lund for latest months [{string.Join(", ", months)}]: {totalMm:F1} mm"
-        : "No Lund rainfall data found.");
-
-    // 3) Streaming with cancellation
-    Console.WriteLine("\nStreaming station temperatures (press any key to cancel)...");
-    using var keyCts = new CancellationTokenSource();
-    using var linked = CancellationTokenSource.CreateLinkedTokenSource(cts.Token, keyCts.Token);
-    _ = Task.Run(() => { Console.ReadKey(true); keyCts.Cancel(); });
-
-    await foreach (var (id, name, t) in svc.StreamAllStationsTemperatureAsync(linked.Token))
+    while (!cts.Token.IsCancellationRequested)
     {
-        var val = t.HasValue ? $"{t.Value:F1} °C" : "n/a";
-        Console.WriteLine($"[{id}] {name}: {val}");
-    }
+        ShowMenu();
+        var key = Console.ReadKey(true);
+        Console.WriteLine();
 
-    Console.WriteLine("Stopped.");
+        try
+        {
+            switch (key.KeyChar)
+            {
+                case '1':
+                    await DisplayAverageTemperatureAsync(svc, cts.Token);
+                    break;
+                case '2':
+                    await DisplayLundRainfallAsync(svc, cts.Token);
+                    break;
+                case '3':
+                    await DisplayAllStationTemperaturesAsync(svc, cts.Token);
+                    break;
+                case '4':
+                    Console.WriteLine("Data will be refreshed on next selection.\n");
+                    break;
+                case 'q':
+                case 'Q':
+                    cts.Cancel();
+                    Console.WriteLine("Exiting...");
+                    return;
+                default:
+                    Console.WriteLine("Invalid option. Please select 1-4 or 'q' to quit.\n");
+                    break;
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            break;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Error: {ex.Message}\n");
+        }
+
+        if (!cts.Token.IsCancellationRequested)
+        {
+            Console.WriteLine("Press any key to return to menu...");
+            Console.ReadKey(true);
+            Console.Clear();
+        }
+    }
 }
 catch (OperationCanceledException)
 {
@@ -82,6 +100,48 @@ catch (Exception ex)
 {
     Console.Error.WriteLine($"Unexpected error: {ex.Message}");
     Environment.ExitCode = 1;
+}
+
+static void ShowMenu()
+{
+    Console.WriteLine("=== Weather Report Menu ===");
+    Console.WriteLine("(1) Display Average temperature in Sweden (latest hour)");
+    Console.WriteLine("(2) Display Total rainfall in Lund (latest months)");
+    Console.WriteLine("(3) Display all station temperatures (with values)");
+    Console.WriteLine("(4) Refresh data");
+    Console.WriteLine("(q) Quit");
+    Console.Write("\nSelect an option: ");
+}
+
+static async Task DisplayAverageTemperatureAsync(IWeatherService svc, CancellationToken ct)
+{
+    Console.WriteLine("\nFetching average temperature data...");
+    var avg = await svc.GetSwedenAverageTemperatureLatestHourAsync(ct);
+    Console.WriteLine(avg is null
+        ? "No temperature data available for the latest hour."
+        : $"Average temperature in Sweden (latest hour): {avg:F1} °C");
+}
+
+static async Task DisplayLundRainfallAsync(IWeatherService svc, CancellationToken ct)
+{
+    Console.WriteLine("\nFetching Lund rainfall data...");
+    var (totalMm, months) = await svc.GetLundTotalRainLatestMonthsAsync(ct);
+    Console.WriteLine(months.Count > 0
+        ? $"Total rainfall in Lund for latest months [{string.Join(", ", months)}]: {totalMm:F1} mm"
+        : "No Lund rainfall data found.");
+}
+
+static async Task DisplayAllStationTemperaturesAsync(IWeatherService svc, CancellationToken ct)
+{
+    Console.WriteLine("\nFetching all station temperatures...\n");
+    var count = 0;
+    await foreach (var (id, name, t) in svc.StreamAllStationsTemperatureAsync(ct))
+    {
+        var val = t.HasValue ? $"{t.Value:F1} °C" : "n/a";
+        Console.WriteLine($"[{id}] {name}: {val}");
+        count++;
+    }
+    Console.WriteLine($"\nTotal stations displayed: {count}");
 }
 
 internal sealed class QuietHttpLoggingHandler : DelegatingHandler

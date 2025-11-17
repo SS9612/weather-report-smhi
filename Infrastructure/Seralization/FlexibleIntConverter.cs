@@ -18,7 +18,6 @@ public sealed class FlexibleIntConverter : JsonConverter<int?>
             var s = reader.GetString();
             if (string.IsNullOrWhiteSpace(s)) return null;
             if (int.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out var n)) return n;
-            // some datasets use quality as non-numeric tags -> treat as null
             return null;
         }
 
